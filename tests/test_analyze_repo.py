@@ -8,6 +8,7 @@ tests/fixtures/ecosystems/<name>/ and asserted here. Run from the repo root:
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -332,6 +333,44 @@ class CliTest(unittest.TestCase):
         data = json.loads(out.stdout.decode("utf-8"))
         self.assertEqual(data["manifests"], ["Cargo.toml"])
 
+
+class AnalyzeRepoIssue34Test(unittest.TestCase):
+    """Regression tests for issue #34: env-var scan scope and broken-symlink file size."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.tmpdir.name)
+        (self.repo_dir / ".git").mkdir()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_env_vars_scanned_in_non_test_files_with_test_in_name(self):
+        latest = self.repo_dir / "latest.py"
+        latest.write_text("import os\ntoken = os.environ['API_TOKEN']\n", encoding="utf-8")
+
+        contest = self.repo_dir / "contest.py"
+        contest.write_text("import os\ndb = os.getenv('CONTEST_DB_URL')\n", encoding="utf-8")
+
+        runner = self.repo_dir / "test_runner.py"
+        runner.write_text("import os\nval = os.environ['IGNORED_TEST_VAR']\n", encoding="utf-8")
+
+        env_vars = analyze_repo.analyze(self.repo_dir).get("env_vars", {})
+        self.assertIn("API_TOKEN", env_vars)
+        self.assertIn("CONTEST_DB_URL", env_vars)
+        self.assertNotIn("IGNORED_TEST_VAR", env_vars)
+
+    def test_file_size_handles_missing_file_and_dangling_symlink(self):
+        missing = self.repo_dir / "does_not_exist.bin"
+        self.assertEqual(analyze_repo.file_size(missing), 0)
+
+        link = self.repo_dir / "broken_link.safetensors"
+        try:
+            link.symlink_to(missing)
+        except (OSError, NotImplementedError):
+            return  # unprivileged Windows cannot create symlinks
+        self.assertEqual(analyze_repo.file_size(link), 0)
+        self.assertIsInstance(analyze_repo.analyze(self.repo_dir), dict)
 
 if __name__ == "__main__":
     unittest.main()
